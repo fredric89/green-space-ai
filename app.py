@@ -27,6 +27,7 @@ except Exception as e:
 # --- 3. HELPER FUNCTIONS ---
 def mask_s2_clouds(image):
     scl = image.select('SCL')
+    # Permissive mask
     mask = scl.neq(3).And(scl.neq(8)).And(scl.neq(9))
     return image.updateMask(mask).divide(10000)
 
@@ -38,12 +39,12 @@ def add_indices(image):
 col1, col2 = st.columns([3, 1])
 
 with col1:
-    st.info("1. Draw a box on the map. 2. Wait for '✅ Geometry Captured'. 3. Click Run.")
+    st.info("1. Draw a box. 2. Wait for '✅ Geometry Captured'. 3. Click Run.")
     
-    # FIX: Initialize empty map (No basemap argument to avoid KeyError)
+    # FIX: Initialize empty map without the 'basemap' argument causing the crash
     m = geemap.Map(center=[12.8797, 121.7740], zoom=6)
     
-    # FIX: Manually add Esri Satellite Tiles (The Bulletproof Way)
+    # FIX: Add Esri Layer MANUALLY via URL (Bypasses the KeyError)
     esri_url = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
     m.add_tile_layer(esri_url, name="Esri Satellite", attribution="Esri")
     
@@ -68,7 +69,6 @@ if st.button("🚀 Run AI Analysis", type="primary"):
     
     roi = None
     
-    # Retrieve ROI
     if "saved_geometry" in st.session_state:
         try:
             coords = st.session_state["saved_geometry"]["coordinates"]
@@ -77,15 +77,15 @@ if st.button("🚀 Run AI Analysis", type="primary"):
             st.error(f"Error reading drawing: {e}")
             st.stop()
     else:
-        st.error("⚠️ No area selected! Please draw a box on the map first.")
+        st.error("⚠️ No area selected! Please draw a box.")
         st.stop()
 
     st.divider()
     
     try:
-        with st.spinner("Processing Satellite Data..."):
+        with st.spinner("Processing Data (Harmonized)..."):
             
-            # CONFIG
+            # CONFIG: Use Harmonized Data
             collection_id = 'COPERNICUS/S2_SR_HARMONIZED'
             common_bands = ['B2', 'B3', 'B4', 'B8', 'SCL']
 
@@ -101,12 +101,11 @@ if st.button("🚀 Run AI Analysis", type="primary"):
                 .select(common_bands).map(mask_s2_clouds).map(add_indices)
 
             # 2. Check Data
-            count_new = dataset_new.size().getInfo()
-            if count_new == 0:
-                 st.error("❌ No satellite images found for this area. Try drawing a larger box.")
+            if dataset_new.size().getInfo() == 0:
+                 st.error("❌ No satellite images found. Try a larger box.")
                  st.stop()
             
-            # 3. Create Composites
+            # 3. Composites
             image_old = dataset_old.median().clip(roi)
             image_new = dataset_new.median().clip(roi)
 
@@ -114,7 +113,7 @@ if st.button("🚀 Run AI Analysis", type="primary"):
             training = image_new.sample(region=roi, scale=30, numPixels=1000) 
             
             if training.size().getInfo() == 0:
-                 st.warning("⚠️ High cloud cover detected. AI results may be inaccurate.")
+                 st.warning("⚠️ High cloud cover. AI results may vary.")
             
             clusterer = ee.Clusterer.wekaKMeans(3).train(training)
             classified_old = image_old.cluster(clusterer)
@@ -133,7 +132,7 @@ if st.button("🚀 Run AI Analysis", type="primary"):
             ai_vis = {'min': 0, 'max': 2, 'palette': ['red', 'green', 'blue']}
             
             # Add Layers
-            m_result.add_layer(image_new, real_vis, "2024 Real Photo (Ref)")
+            m_result.add_layer(image_new, real_vis, "2024 Real Photo")
             m_result.add_layer(classified_old, ai_vis, "2017 AI Map")
             m_result.add_layer(classified_new, ai_vis, "2024 AI Map")
             
