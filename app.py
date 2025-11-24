@@ -5,8 +5,8 @@ import json
 from google.oauth2 import service_account
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Green Space AI - PH Edition")
-st.title("🌍 AI Green Space Analyzer (Philippines - Force Render Mode)")
+st.set_page_config(layout="wide", page_title="Green Space AI")
+st.title("🌍 AI Green Space Analyzer (Final Fix)")
 
 # --- 2. AUTHENTICATION ---
 try:
@@ -26,16 +26,14 @@ except Exception as e:
 
 # --- 3. HELPER FUNCTIONS ---
 def mask_s2_clouds(image):
-    # We use a gentler mask. We only remove Saturated (1) and massive clouds.
-    # We keep "thin cirrus" to ensure we always have pixels to show.
+    # Aggressive Cloud Masking
     scl = image.select('SCL')
-    mask = scl.neq(3).And(scl.neq(8)).And(scl.neq(9)) 
+    mask = scl.neq(3).And(scl.neq(8)).And(scl.neq(9))
     return image.updateMask(mask).divide(10000)
 
 def add_indices(image):
     ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI')
-    ndbi = image.normalizedDifference(['B11', 'B8']).rename('NDBI')
-    return image.addBands([ndvi, ndbi])
+    return image.addBands(ndvi)
 
 # --- 4. SIDEBAR INPUTS ---
 with st.sidebar:
@@ -46,21 +44,16 @@ with st.sidebar:
     roi = None
     
     if analysis_mode == "Select City":
-        city = st.selectbox("Location:", ["Manila", "Surigao City", "Laguna Province", "Quezon City", "Cebu City", "Davao City"])
+        city = st.selectbox("Location:", ["Manila", "Surigao City", "Laguna Province", "Quezon City"])
         
-        # INCREASED BUFFER SIZES slightly for better context
         if city == "Manila":
-            roi = ee.Geometry.Point([120.9842, 14.5995]).buffer(6000).bounds()
+            roi = ee.Geometry.Point([120.9842, 14.5995]).buffer(5000).bounds()
         elif city == "Surigao City":
-            roi = ee.Geometry.Point([125.4933, 9.7828]).buffer(8000).bounds()
+            roi = ee.Geometry.Point([125.4933, 9.7828]).buffer(6000).bounds()
         elif city == "Laguna Province":
-            roi = ee.Geometry.Point([121.25, 14.20]).buffer(15000).bounds()
+            roi = ee.Geometry.Point([121.25, 14.20]).buffer(12000).bounds()
         elif city == "Quezon City":
-            roi = ee.Geometry.Point([121.0437, 14.6760]).buffer(8000).bounds()
-        elif city == "Cebu City":
-            roi = ee.Geometry.Point([123.8854, 10.3157]).buffer(8000).bounds()
-        elif city == "Davao City":
-            roi = ee.Geometry.Point([125.6001, 7.1907]).buffer(8000).bounds()
+            roi = ee.Geometry.Point([121.0437, 14.6760]).buffer(6000).bounds()
             
         st.success(f"📍 {city} Selected")
 
@@ -87,7 +80,7 @@ if analysis_mode == "Draw Area":
             pass
 
 # --- 6. MAIN EXECUTION ---
-if st.button("🚀 Run Analysis (Force Render)", type="primary"):
+if st.button("🚀 Run Analysis", type="primary"):
     
     if roi is None:
         st.error("⚠️ Please select a city or draw an area.")
@@ -96,88 +89,86 @@ if st.button("🚀 Run Analysis (Force Render)", type="primary"):
     st.divider()
     
     try:
-        with st.spinner("Processing... (Ignoring cloud limits to force output)"):
+        with st.spinner("Processing..."):
             
-            common_bands = ['B2', 'B3', 'B4', 'B8', 'B11', 'SCL']
+            # --- CRITICAL FIX: USING HARMONIZED DATASET ---
+            # This matches the error log advice.
+            collection_id = 'COPERNICUS/S2_SR_HARMONIZED'
+            common_bands = ['B2', 'B3', 'B4', 'B8', 'SCL']
 
-            # --- THE FIX: REMOVED CLOUD FILTER ---
-            # We took out .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 80))
-            # This ensures we get ALL images, even if they are 100% cloudy.
-            # The .median() function will mathematically remove the clouds later.
-            
-            dataset_old = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
+            # 1. Fetch 2017 Data
+            dataset_old = ee.ImageCollection(collection_id) \
                 .filterDate('2017-01-01', '2019-12-31') \
                 .filterBounds(roi) \
                 .select(common_bands).map(mask_s2_clouds).map(add_indices)
 
-            dataset_new = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
+            # 2. Fetch 2023-2024 Data
+            dataset_new = ee.ImageCollection(collection_id) \
                 .filterDate('2023-01-01', '2024-12-30') \
                 .filterBounds(roi) \
                 .select(common_bands).map(mask_s2_clouds).map(add_indices)
 
-            # Create Composites (The Median "Magic")
+            # 3. DEBUG: Print counts to screen so we KNOW data exists
+            count_new = dataset_new.size().getInfo()
+            if count_new == 0:
+                 st.error("❌ No data found! The map will be blank.")
+                 st.stop()
+            else:
+                 st.info(f"✅ Found {count_new} images for 2024. Processing map...")
+
+            # 4. Create Composites (Median removes clouds)
             image_old = dataset_old.median().clip(roi)
             image_new = dataset_new.median().clip(roi)
 
-            # --- AI TRAINING ---
-            # We sample pixels. If this fails, we catch the error but STILL show the real map.
-            try:
-                training = image_new.sample(region=roi, scale=30, numPixels=1000)
-                clusterer = ee.Clusterer.wekaKMeans(3).train(training)
-                classified_old = image_old.cluster(clusterer)
-                classified_new = image_new.cluster(clusterer)
-                ai_success = True
-            except:
-                ai_success = False
-                st.warning("⚠️ AI Classification failed (too many clouds), but showing Real Images below.")
+            # 5. AI Classification
+            # SCALE set to 50m for speed.
+            training = image_new.sample(region=roi, scale=50, numPixels=1000) 
+            clusterer = ee.Clusterer.wekaKMeans(3).train(training)
+            classified_old = image_old.cluster(clusterer)
+            classified_new = image_new.cluster(clusterer)
 
-            # --- 8. RESULTS MAP ---
+            # --- 7. RESULTS MAP ---
             st.subheader("Map Visualization")
             
             m_result = geemap.Map()
             m_result.centerObject(roi, 12)
             
-            # VISUALIZATION PARAMETERS
+            # VISUALIZATION
+            # We show Real Photos AND AI.
+            real_vis = {'min': 0, 'max': 3000, 'bands': ['B4', 'B3', 'B2']}
             ai_vis = {'min': 0, 'max': 2, 'palette': ['red', 'green', 'blue']}
-            real_vis = {'min': 0, 'max': 3000, 'bands': ['B4', 'B3', 'B2']} # True Color
             
-            # LAYER 1: The AI Layers (If successful)
-            if ai_success:
-                m_result.add_layer(classified_old, ai_vis, "2017 AI Analysis")
-                m_result.add_layer(classified_new, ai_vis, "2024 AI Analysis")
-            
-            # LAYER 2: The "Real" Satellite Photos (Backup)
-            # These will ALWAYS show up.
-            m_result.add_layer(image_old, real_vis, "2017 Real Photo")
+            # Add Layers
             m_result.add_layer(image_new, real_vis, "2024 Real Photo")
+            m_result.add_layer(classified_old, ai_vis, "2017 AI Map")
+            m_result.add_layer(classified_new, ai_vis, "2024 AI Map")
             
             m_result.add_layer_control()
+            
+            # FORCE RENDER
             m_result.to_streamlit(height=600, bidirectional=False)
             
-            # --- 9. STATISTICS ---
-            if ai_success:
-                st.write("Calculated Statistics:")
-                GREEN_CLASS_ID = 1 
-                def get_area(img):
-                    mask = img.eq(GREEN_CLASS_ID)
-                    area = mask.multiply(ee.Image.pixelArea()).reduceRegion(
-                        reducer=ee.Reducer.sum(), geometry=roi, scale=30, maxPixels=1e9
-                    )
-                    return area.get('cluster').getInfo()
+            # --- 8. STATISTICS ---
+            GREEN_CLASS_ID = 1 
+            def get_area(img):
+                mask = img.eq(GREEN_CLASS_ID)
+                # MaxPixels increased to prevent timeouts
+                area = mask.multiply(ee.Image.pixelArea()).reduceRegion(
+                    reducer=ee.Reducer.sum(), geometry=roi, scale=50, maxPixels=1e9
+                )
+                return area.get('cluster').getInfo()
 
-                val_old = get_area(classified_old) or 0
-                val_new = get_area(classified_new) or 0
-                
-                km_old = val_old / 1e6
-                km_new = val_new / 1e6
-                diff = km_new - km_old
+            val_old = get_area(classified_old) or 0
+            val_new = get_area(classified_new) or 0
+            
+            km_old = val_old / 1e6
+            km_new = val_new / 1e6
+            diff = km_new - km_old
 
-                c1, c2, c3 = st.columns(3)
-                c1.metric("2017 Vegetation", f"{km_old:.2f} km²")
-                c2.metric("2024 Vegetation", f"{km_new:.2f} km²")
-                c3.metric("Difference", f"{diff:.2f} km²", delta=f"{diff:.2f} km²")
-            else:
-                st.write("Statistics unavailable due to cloud cover.")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("2017 Vegetation", f"{km_old:.2f} km²")
+            c2.metric("2024 Vegetation", f"{km_new:.2f} km²")
+            c3.metric("Difference", f"{diff:.2f} km²", delta=f"{diff:.2f} km²")
 
     except Exception as e:
         st.error(f"Error: {e}")
