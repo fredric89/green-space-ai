@@ -5,31 +5,22 @@ import matplotlib.pyplot as plt
 import json
 from google.oauth2 import service_account
 
-# --- 1. STREAMLIT CONFIGURATION ---
+# --- 1. CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Green Space AI")
-
 st.title("🌍 AI Green Space Analyzer (2017 vs 2024)")
 st.markdown("Compare satellite imagery to detect changes in urban green space.")
 
 # --- 2. AUTHENTICATION ---
 try:
-    # 1. Get the JSON Key
     if "earth_engine" in st.secrets and "service_account_json" in st.secrets["earth_engine"]:
          key_content = st.secrets["earth_engine"]["service_account_json"]
     else:
-         # Fallback for different secret structures
          key_content = st.secrets["service_account_json"]
          
     service_account_info = json.loads(key_content, strict=False)
-    
-    # 2. Define the Permissions (Scopes)
     my_scopes = ['https://www.googleapis.com/auth/earthengine']
-    
-    # 3. Create Credentials
     creds = service_account.Credentials.from_service_account_info(service_account_info)
     creds = creds.with_scopes(my_scopes)
-    
-    # 4. Initialize
     ee.Initialize(creds, project="mystic-curve-479206-q2")
     
 except Exception as e:
@@ -51,7 +42,7 @@ def add_indices(image):
 CLOUD_LIMIT = 80
 GREEN_CLASS_ID = 1
 
-# --- 5. MAP INTERFACE (WITH FIX) ---
+# --- 5. MAP INTERFACE ---
 col1, col2 = st.columns([2, 1])
 
 with col1:
@@ -61,39 +52,34 @@ with col1:
     m = geemap.Map()
     m.add_basemap('HYBRID')
     
-    # Render Map
-    map_output = m.to_streamlit(height=500)
-    
-    # --- SAFEGUARDED MEMORY SAVE ---
-    # 1. We check if map_output is a DICTIONARY (Data) not a UI Element
-    # 2. We check if it has the drawing key
-    if isinstance(map_output, dict) and map_output.get("last_active_drawing"):
-        drawing_geometry = map_output["last_active_drawing"]["geometry"]
-        # Save to Session State (Memory)
-        st.session_state["user_drawing"] = drawing_geometry
-        st.success("✅ Area Captured! Now click 'Run AI Analysis'.")
+    # --- THE FIX: ADD A UNIQUE KEY ---
+    # We add key="satellite_map" so Streamlit doesn't reset it on every click.
+    # The map data will automatically be stored in st.session_state["satellite_map"]
+    map_output = m.to_streamlit(height=500, key="satellite_map")
 
 # --- 6. ANALYSIS LOGIC ---
 if st.button("Run AI Analysis"):
     
     roi = None
     
-    # --- READ FROM MEMORY ---
-    # We ignore the map (which might be resetting) and look at the memory instead
-    if "user_drawing" in st.session_state:
-        try:
-            coords = st.session_state["user_drawing"]["coordinates"]
-            roi = ee.Geometry.Polygon(coords)
-        except Exception as e:
-            st.warning(f"Error reading shape: {e}")
+    # --- CHECK THE KEYED STATE DIRECTLY ---
+    # We look directly into the session state using the key we defined above
+    data = st.session_state.get("satellite_map", {})
+    
+    if data and data.get("last_active_drawing"):
+        # We found the drawing!
+        coords = data["last_active_drawing"]["geometry"]["coordinates"]
+        roi = ee.Geometry.Polygon(coords)
+        st.success("✅ Drawing detected! Starting analysis...")
     else:
-        st.warning("⚠️ No box detected in memory. Using London (Default).")
+        # Fallback
+        st.warning("⚠️ No drawing found. Did you draw a rectangle? Using London (Default).")
         roi = ee.Geometry.Point([-0.12, 51.50]).buffer(10000).bounds()
 
-    with st.spinner("Accessing Satellite Constellation..."):
+    with st.spinner("Processing Satellite Data (2017 vs 2024)..."):
+        # (Standard Analysis Code)
         common_bands = ['B2', 'B3', 'B4', 'B8', 'B11', 'SCL']
         
-        # Load Data
         dataset_old = ee.ImageCollection('COPERNICUS/S2_SR') \
             .filterDate('2017-01-01', '2019-12-31') \
             .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', CLOUD_LIMIT)) \
@@ -114,17 +100,13 @@ if st.button("Run AI Analysis"):
             .map(mask_s2_clouds) \
             .map(add_indices)
 
-        # Create Medians
         image_old = dataset_old.median().clip(roi)
         image_new = dataset_new.median().clip(roi)
 
-        # Classification
         training = image_new.sample(region=roi, scale=10, numPixels=5000)
         clusterer = ee.Clusterer.wekaKMeans(3).train(training)
         classified_old = image_old.cluster(clusterer)
         classified_new = image_new.cluster(clusterer)
-        
-        st.success("Analysis Complete! Scroll down for results.")
 
     # --- 7. RESULTS ---
     st.subheader("Visual Comparison")
