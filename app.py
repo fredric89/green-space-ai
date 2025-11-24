@@ -7,11 +7,9 @@ from google.oauth2 import service_account
 # --- 1. CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Green Space AI")
 st.title("🌍 AI Green Space Analyzer")
-st.markdown("Compare 2017 vs 2024 satellite imagery.")
 
 # --- 2. AUTHENTICATION ---
 try:
-    # Handle different secret structures safely
     if "earth_engine" in st.secrets and "service_account_json" in st.secrets["earth_engine"]:
          key_content = st.secrets["earth_engine"]["service_account_json"]
     else:
@@ -37,63 +35,55 @@ def add_indices(image):
     ndbi = image.normalizedDifference(['B11', 'B8']).rename('NDBI')
     return image.addBands([ndvi, ndbi])
 
-# --- 4. MAP INTERFACE & "SAFETY VAULT" LOGIC ---
+# --- 4. MAP INTERFACE ---
 col1, col2 = st.columns([3, 1])
 
 with col1:
-    st.info("1. Draw a box. 2. Wait for the '✅ Saved' message. 3. Click Run.")
+    st.info("1. Draw a box. 2. Wait for '✅ Saved'. 3. Click Run.")
     
-    # Initialize Map
     m = geemap.Map()
     m.add_basemap('HYBRID')
     
-    # Render Map and get output
-    # We use a static key to try and keep the map stable
-    map_output = m.to_streamlit(height=500, key="satellite_map")
+    # RENDER THE MAP
+    # We use 'bidirectional=True' to ensure data flows back to Python
+    map_output = m.to_streamlit(height=500, bidirectional=True)
 
-    # --- THE SAFETY VAULT ---
-    # Every time the script runs (even before you click the button),
-    # we check if there is a drawing. If yes, we SAVE it to permanent memory.
-    if map_output is not None and "last_active_drawing" in map_output:
+    # --- THE CRITICAL FIX ---
+    # We check if map_output is actually a Dictionary (Data). 
+    # If it is a DeltaGenerator (UI Element), we SKIP this block to avoid the crash.
+    if isinstance(map_output, dict) and "last_active_drawing" in map_output:
         drawing = map_output["last_active_drawing"]
         if drawing is not None:
-            # Save to session state
             st.session_state["saved_geometry"] = drawing["geometry"]
 
 with col2:
-    # Status Indicator
     if "saved_geometry" in st.session_state:
-        st.success(f"✅ Region Saved!", icon="💾")
-        st.write("Ready to analyze.")
+        st.success("✅ Region Saved!", icon="💾")
     else:
-        st.warning("Waiting for drawing...", icon="✏️")
+        st.warning("Draw a box on the map.", icon="✏️")
 
 # --- 5. ANALYSIS LOGIC ---
 if st.button("Run AI Analysis", type="primary"):
     
     roi = None
     
-    # We look inside the "Safety Vault", NOT at the map directly.
-    # This prevents the "No drawing found" error if the map resets.
     if "saved_geometry" in st.session_state:
         try:
             coords = st.session_state["saved_geometry"]["coordinates"]
             roi = ee.Geometry.Polygon(coords)
         except Exception as e:
-            st.error(f"Error reading coordinates: {e}")
+            st.error(f"Coordinates Error: {e}")
             st.stop()
     else:
-        st.error("⚠️ No drawing saved! Please draw a box first.")
-        # Fallback to London just so it doesn't crash
+        st.error("⚠️ No drawing found! Please draw a box and wait for the ✅.")
+        # Fallback to London to prevent crash
         roi = ee.Geometry.Point([-0.12, 51.50]).buffer(5000).bounds()
 
-    with st.spinner("Processing..."):
+    with st.spinner("Analyzing Satellite Data..."):
         # Fixed Parameters
         CLOUD_LIMIT = 80
-        GREEN_CLASS_ID = 1
         common_bands = ['B2', 'B3', 'B4', 'B8', 'B11', 'SCL']
 
-        # 1. Fetch Data
         dataset_old = ee.ImageCollection('COPERNICUS/S2_SR') \
             .filterDate('2017-01-01', '2019-12-31') \
             .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', CLOUD_LIMIT)) \
@@ -106,11 +96,9 @@ if st.button("Run AI Analysis", type="primary"):
             .filterBounds(roi).sort('CLOUDY_PIXEL_PERCENTAGE').limit(30) \
             .select(common_bands).map(mask_s2_clouds).map(add_indices)
 
-        # 2. Process
         image_old = dataset_old.median().clip(roi)
         image_new = dataset_new.median().clip(roi)
 
-        # 3. Classify
         training = image_new.sample(region=roi, scale=10, numPixels=5000)
         clusterer = ee.Clusterer.wekaKMeans(3).train(training)
         classified_old = image_old.cluster(clusterer)
@@ -120,7 +108,6 @@ if st.button("Run AI Analysis", type="primary"):
     st.divider()
     st.subheader("Results")
     
-    # Display Result Map
     m2 = geemap.Map()
     m2.centerObject(roi, 13)
     vis = {'min': 0, 'max': 2, 'palette': ['red', 'green', 'blue']}
@@ -131,6 +118,7 @@ if st.button("Run AI Analysis", type="primary"):
     m2.to_streamlit(height=500)
 
     # Calculate Metrics
+    GREEN_CLASS_ID = 1
     def get_area(img):
         mask = img.eq(GREEN_CLASS_ID)
         area = mask.multiply(ee.Image.pixelArea()).reduceRegion(
@@ -145,7 +133,6 @@ if st.button("Run AI Analysis", type="primary"):
     km_new = val_new / 1e6
     diff = km_new - km_old
 
-    # Metrics Row
     c1, c2, c3 = st.columns(3)
     c1.metric("2017 Green Space", f"{km_old:.2f} km²")
     c2.metric("2024 Green Space", f"{km_new:.2f} km²")
