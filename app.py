@@ -5,8 +5,8 @@ import json
 from google.oauth2 import service_account
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Green Space AI (Debug Mode)")
-st.title("🌍 AI Green Space Analyzer (Debug Mode)")
+st.set_page_config(layout="wide", page_title="Green Space AI")
+st.title("🌍 AI Green Space Analyzer (Custom Draw)")
 
 # --- 2. AUTHENTICATION ---
 try:
@@ -26,8 +26,8 @@ except Exception as e:
 
 # --- 3. HELPER FUNCTIONS ---
 def mask_s2_clouds(image):
+    # Permissive mask to ensure data shows up even if slightly cloudy
     scl = image.select('SCL')
-    # Very permissive mask (keep almost everything to ensure data shows up)
     mask = scl.neq(3).And(scl.neq(8)).And(scl.neq(9))
     return image.updateMask(mask).divide(10000)
 
@@ -35,82 +35,136 @@ def add_indices(image):
     ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI')
     return image.addBands(ndvi)
 
-# --- 4. SIDEBAR INPUTS ---
-with st.sidebar:
-    st.header("Settings")
-    
-    # We stick to "Select City" to minimize variables for now
-    city = st.selectbox("Location:", ["Manila", "Surigao City", "Laguna Province", "Quezon City"])
-    
-    roi = None
-    if city == "Manila":
-        roi = ee.Geometry.Point([120.9842, 14.5995]).buffer(5000).bounds()
-    elif city == "Surigao City":
-        roi = ee.Geometry.Point([125.4933, 9.7828]).buffer(6000).bounds()
-    elif city == "Laguna Province":
-        roi = ee.Geometry.Point([121.25, 14.20]).buffer(10000).bounds()
-    elif city == "Quezon City":
-        roi = ee.Geometry.Point([121.0437, 14.6760]).buffer(6000).bounds()
+# --- 4. DRAWING INTERFACE ---
+col1, col2 = st.columns([3, 1])
 
-    st.info("Click 'Run' to generate the map.")
+with col1:
+    st.info("1. Draw a box on the map. 2. Wait for '✅ Geometry Captured'. 3. Click Run.")
+    
+    # REQUESTED: Use Esri World Imagery
+    m = geemap.Map(center=[12.8797, 121.7740], zoom=6, basemap="Esri.WorldImagery")
+    
+    # Render Map with bidirectional data flow
+    map_output = m.to_streamlit(height=500, key="input_map", bidirectional=True)
+
+    # SAFETY CHECK: Save drawing to memory immediately
+    if map_output is not None and isinstance(map_output, dict) and "last_active_drawing" in map_output:
+        drawing = map_output["last_active_drawing"]
+        if drawing:
+            st.session_state["saved_geometry"] = drawing["geometry"]
+
+with col2:
+    # Status Indicator
+    if "saved_geometry" in st.session_state:
+        st.success("✅ Geometry Captured!", icon="💾")
+        st.write("Ready to analyze.")
+    else:
+        st.warning("Please draw a box.", icon="✏️")
 
 # --- 5. MAIN EXECUTION ---
-if st.button("🚀 Run Analysis", type="primary"):
+if st.button("🚀 Run AI Analysis", type="primary"):
     
+    roi = None
+    
+    # Retrieve ROI from memory (Safe Mode)
+    if "saved_geometry" in st.session_state:
+        try:
+            coords = st.session_state["saved_geometry"]["coordinates"]
+            roi = ee.Geometry.Polygon(coords)
+        except Exception as e:
+            st.error(f"Error reading drawing: {e}")
+            st.stop()
+    else:
+        st.error("⚠️ No area selected! Please draw a box on the map first.")
+        st.stop()
+
     st.divider()
     
     try:
-        with st.spinner("Fetching Data..."):
+        with st.spinner("Processing Satellite Data..."):
             
-            # --- DEBUG STEP 1: VERIFY DATA EXISTS ---
-            # Using Harmonized collection
-            dataset_2024 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
-                .filterDate('2024-01-01', '2024-06-30') \
+            # CONFIG
+            # Using Harmonized collection to ensure 2024 data exists
+            collection_id = 'COPERNICUS/S2_SR_HARMONIZED'
+            common_bands = ['B2', 'B3', 'B4', 'B8', 'SCL']
+
+            # 1. Fetch Data
+            dataset_old = ee.ImageCollection(collection_id) \
+                .filterDate('2017-01-01', '2019-12-31') \
                 .filterBounds(roi) \
-                .select(['B4', 'B3', 'B2', 'SCL']) \
-                .map(mask_s2_clouds)
-            
-            count = dataset_2024.size().getInfo()
-            if count > 0:
-                st.success(f"✅ Data Connection Active: Found {count} satellite images.")
-            else:
-                st.error("❌ No satellite images found. The map will be empty.")
-                st.stop()
+                .select(common_bands).map(mask_s2_clouds).map(add_indices)
 
-            # --- DEBUG STEP 2: CREATE LAYERS ---
-            # We create a simple median composite
-            image_2024 = dataset_2024.median().clip(roi)
-            
-            # Simple NDVI (Vegetation) Layer
-            ndvi = image_2024.normalizedDifference(['B8', 'B4']).rename('NDVI')
+            dataset_new = ee.ImageCollection(collection_id) \
+                .filterDate('2023-01-01', '2024-12-30') \
+                .filterBounds(roi) \
+                .select(common_bands).map(mask_s2_clouds).map(add_indices)
 
-            # --- DEBUG STEP 3: RENDER MAP (THE FIX) ---
-            st.subheader("Map Visualization")
+            # 2. Check Data Availability
+            count_new = dataset_new.size().getInfo()
+            if count_new == 0:
+                 st.error("❌ No satellite images found for this area. Try drawing a larger box.")
+                 st.stop()
             
-            # FIX 1: CHANGE BASEMAP
-            # Google 'HYBRID' often fails without an API key. 
-            # 'Esri.WorldImagery' is free and reliable.
-            m = geemap.Map(basemap="Esri.WorldImagery") 
-            m.centerObject(roi, 13)
+            # 3. Create Composites (Median removes clouds)
+            image_old = dataset_old.median().clip(roi)
+            image_new = dataset_new.median().clip(roi)
+
+            # 4. AI Classification
+            # Sampling pixels to train the AI
+            training = image_new.sample(region=roi, scale=30, numPixels=1000) 
             
-            # VISUALIZATION PARAMETERS
-            real_vis = {'min': 0, 'max': 0.3, 'bands': ['B4', 'B3', 'B2']} # True Color
+            if training.size().getInfo() == 0:
+                 st.warning("⚠️ High cloud cover detected. AI results may be inaccurate.")
             
-            # LAYER 1: 2024 True Color (Satellite View)
-            m.add_layer(image_2024, real_vis, "2024 True Color")
+            # Train Clusterer (3 Classes: Water, Vegetation, Urban)
+            clusterer = ee.Clusterer.wekaKMeans(3).train(training)
+            classified_old = image_old.cluster(clusterer)
+            classified_new = image_new.cluster(clusterer)
+
+            # --- 6. RESULTS MAP ---
+            st.subheader("Analysis Results")
             
-            # LAYER 2: SRTM Elevation (This is the Sanity Check)
-            # This dataset works 100% of the time. If you don't see this, the map is broken.
-            dem = ee.Image('USGS/SRTMGL1_003').clip(roi)
-            dem_vis = {'min': 0, 'max': 1000, 'palette': ['black', 'blue', 'purple', 'cyan', 'green', 'yellow', 'red', 'white']}
-            m.add_layer(dem, dem_vis, "DEBUG: Elevation (Sanity Check)")
+            # REQUESTED: Result map also uses Esri
+            m_result = geemap.Map(basemap="Esri.WorldImagery")
+            m_result.centerObject(roi, 13)
             
-            m.add_layer_control()
+            # VISUALIZATION
+            real_vis = {'min': 0, 'max': 3000, 'bands': ['B4', 'B3', 'B2']} # True Color
+            ai_vis = {'min': 0, 'max': 2, 'palette': ['red', 'green', 'blue']}
             
-            # FORCE RENDER
-            m.to_streamlit(height=600, bidirectional=False)
+            # Add Layers
+            m_result.add_layer(image_new, real_vis, "2024 Real Photo (Ref)")
+            m_result.add_layer(classified_old, ai_vis, "2017 AI Map")
+            m_result.add_layer(classified_new, ai_vis, "2024 AI Map")
             
-            st.caption("Layer Guide: '2024 True Color' is the satellite. 'DEBUG: Elevation' is a test layer.")
+            m_result.add_layer_control()
+            
+            # Force Render (bidirectional=False prevents bugs)
+            m_result.to_streamlit(height=600, bidirectional=False)
+            
+            # --- 7. STATISTICS ---
+            st.write("### Statistics")
+            GREEN_CLASS_ID = 1 
+            
+            def get_area(img):
+                mask = img.eq(GREEN_CLASS_ID)
+                # Scale 30m for balance of speed/accuracy
+                area = mask.multiply(ee.Image.pixelArea()).reduceRegion(
+                    reducer=ee.Reducer.sum(), geometry=roi, scale=30, maxPixels=1e9
+                )
+                return area.get('cluster').getInfo()
+
+            val_old = get_area(classified_old) or 0
+            val_new = get_area(classified_new) or 0
+            
+            km_old = val_old / 1e6
+            km_new = val_new / 1e6
+            diff = km_new - km_old
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("2017 Vegetation", f"{km_old:.2f} km²")
+            c2.metric("2024 Vegetation", f"{km_new:.2f} km²")
+            c3.metric("Difference", f"{diff:.2f} km²", delta=f"{diff:.2f} km²")
 
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Analysis Failed: {e}")
