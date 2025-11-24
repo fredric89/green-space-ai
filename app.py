@@ -26,7 +26,6 @@ except Exception as e:
 
 # --- 3. HELPER FUNCTIONS ---
 def mask_s2_clouds(image):
-    # Permissive mask to ensure data shows up even if slightly cloudy
     scl = image.select('SCL')
     mask = scl.neq(3).And(scl.neq(8)).And(scl.neq(9))
     return image.updateMask(mask).divide(10000)
@@ -41,20 +40,23 @@ col1, col2 = st.columns([3, 1])
 with col1:
     st.info("1. Draw a box on the map. 2. Wait for '✅ Geometry Captured'. 3. Click Run.")
     
-    # REQUESTED: Use Esri World Imagery
-    m = geemap.Map(center=[12.8797, 121.7740], zoom=6, basemap="Esri.WorldImagery")
+    # FIX: Initialize empty map (No basemap argument to avoid KeyError)
+    m = geemap.Map(center=[12.8797, 121.7740], zoom=6)
     
-    # Render Map with bidirectional data flow
+    # FIX: Manually add Esri Satellite Tiles (The Bulletproof Way)
+    esri_url = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+    m.add_tile_layer(esri_url, name="Esri Satellite", attribution="Esri")
+    
+    # Render Map
     map_output = m.to_streamlit(height=500, key="input_map", bidirectional=True)
 
-    # SAFETY CHECK: Save drawing to memory immediately
+    # Save drawing
     if map_output is not None and isinstance(map_output, dict) and "last_active_drawing" in map_output:
         drawing = map_output["last_active_drawing"]
         if drawing:
             st.session_state["saved_geometry"] = drawing["geometry"]
 
 with col2:
-    # Status Indicator
     if "saved_geometry" in st.session_state:
         st.success("✅ Geometry Captured!", icon="💾")
         st.write("Ready to analyze.")
@@ -66,7 +68,7 @@ if st.button("🚀 Run AI Analysis", type="primary"):
     
     roi = None
     
-    # Retrieve ROI from memory (Safe Mode)
+    # Retrieve ROI
     if "saved_geometry" in st.session_state:
         try:
             coords = st.session_state["saved_geometry"]["coordinates"]
@@ -84,7 +86,6 @@ if st.button("🚀 Run AI Analysis", type="primary"):
         with st.spinner("Processing Satellite Data..."):
             
             # CONFIG
-            # Using Harmonized collection to ensure 2024 data exists
             collection_id = 'COPERNICUS/S2_SR_HARMONIZED'
             common_bands = ['B2', 'B3', 'B4', 'B8', 'SCL']
 
@@ -99,24 +100,22 @@ if st.button("🚀 Run AI Analysis", type="primary"):
                 .filterBounds(roi) \
                 .select(common_bands).map(mask_s2_clouds).map(add_indices)
 
-            # 2. Check Data Availability
+            # 2. Check Data
             count_new = dataset_new.size().getInfo()
             if count_new == 0:
                  st.error("❌ No satellite images found for this area. Try drawing a larger box.")
                  st.stop()
             
-            # 3. Create Composites (Median removes clouds)
+            # 3. Create Composites
             image_old = dataset_old.median().clip(roi)
             image_new = dataset_new.median().clip(roi)
 
             # 4. AI Classification
-            # Sampling pixels to train the AI
             training = image_new.sample(region=roi, scale=30, numPixels=1000) 
             
             if training.size().getInfo() == 0:
                  st.warning("⚠️ High cloud cover detected. AI results may be inaccurate.")
             
-            # Train Clusterer (3 Classes: Water, Vegetation, Urban)
             clusterer = ee.Clusterer.wekaKMeans(3).train(training)
             classified_old = image_old.cluster(clusterer)
             classified_new = image_new.cluster(clusterer)
@@ -124,12 +123,13 @@ if st.button("🚀 Run AI Analysis", type="primary"):
             # --- 6. RESULTS MAP ---
             st.subheader("Analysis Results")
             
-            # REQUESTED: Result map also uses Esri
-            m_result = geemap.Map(basemap="Esri.WorldImagery")
+            # FIX: Initialize Result Map with Manual Esri Layer
+            m_result = geemap.Map()
+            m_result.add_tile_layer(esri_url, name="Esri Satellite", attribution="Esri")
             m_result.centerObject(roi, 13)
             
             # VISUALIZATION
-            real_vis = {'min': 0, 'max': 3000, 'bands': ['B4', 'B3', 'B2']} # True Color
+            real_vis = {'min': 0, 'max': 3000, 'bands': ['B4', 'B3', 'B2']}
             ai_vis = {'min': 0, 'max': 2, 'palette': ['red', 'green', 'blue']}
             
             # Add Layers
@@ -139,7 +139,7 @@ if st.button("🚀 Run AI Analysis", type="primary"):
             
             m_result.add_layer_control()
             
-            # Force Render (bidirectional=False prevents bugs)
+            # Force Render
             m_result.to_streamlit(height=600, bidirectional=False)
             
             # --- 7. STATISTICS ---
@@ -148,7 +148,6 @@ if st.button("🚀 Run AI Analysis", type="primary"):
             
             def get_area(img):
                 mask = img.eq(GREEN_CLASS_ID)
-                # Scale 30m for balance of speed/accuracy
                 area = mask.multiply(ee.Image.pixelArea()).reduceRegion(
                     reducer=ee.Reducer.sum(), geometry=roi, scale=30, maxPixels=1e9
                 )
