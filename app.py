@@ -1,30 +1,29 @@
 import streamlit as st
 import ee
 import geemap.foliumap as geemap
-import matplotlib.pyplot as plt
 import json
 from google.oauth2 import service_account
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Green Space AI")
-st.title("🌍 AI Green Space Analyzer (2017 vs 2024)")
-st.markdown("Compare satellite imagery to detect changes in urban green space.")
+st.title("🌍 AI Green Space Analyzer")
+st.markdown("Compare 2017 vs 2024 satellite imagery.")
 
 # --- 2. AUTHENTICATION ---
 try:
+    # Handle different secret structures safely
     if "earth_engine" in st.secrets and "service_account_json" in st.secrets["earth_engine"]:
          key_content = st.secrets["earth_engine"]["service_account_json"]
     else:
          key_content = st.secrets["service_account_json"]
          
     service_account_info = json.loads(key_content, strict=False)
-    my_scopes = ['https://www.googleapis.com/auth/earthengine']
     creds = service_account.Credentials.from_service_account_info(service_account_info)
-    creds = creds.with_scopes(my_scopes)
+    creds = creds.with_scopes(['https://www.googleapis.com/auth/earthengine'])
     ee.Initialize(creds, project="mystic-curve-479206-q2")
     
 except Exception as e:
-    st.error(f"Authentication failed: {e}")
+    st.error(f"Authentication Error: {e}")
     st.stop()
 
 # --- 3. HELPER FUNCTIONS ---
@@ -38,135 +37,116 @@ def add_indices(image):
     ndbi = image.normalizedDifference(['B11', 'B8']).rename('NDBI')
     return image.addBands([ndvi, ndbi])
 
-# --- 4. FIXED SETTINGS ---
-CLOUD_LIMIT = 80
-GREEN_CLASS_ID = 1
-
-# --- 5. MAP INTERFACE ---
-col1, col2 = st.columns([2, 1])
+# --- 4. MAP INTERFACE & "SAFETY VAULT" LOGIC ---
+col1, col2 = st.columns([3, 1])
 
 with col1:
-    st.subheader("1. Select Region")
-    st.info("Zoom to your city and draw a rectangle using the tool on the left.")
+    st.info("1. Draw a box. 2. Wait for the '✅ Saved' message. 3. Click Run.")
     
+    # Initialize Map
     m = geemap.Map()
     m.add_basemap('HYBRID')
     
-    # --- THE FIX: ADD A UNIQUE KEY ---
-    # We add key="satellite_map" so Streamlit doesn't reset it on every click.
-    # The map data will automatically be stored in st.session_state["satellite_map"]
+    # Render Map and get output
+    # We use a static key to try and keep the map stable
     map_output = m.to_streamlit(height=500, key="satellite_map")
 
-# --- 6. ANALYSIS LOGIC ---
-if st.button("Run AI Analysis"):
+    # --- THE SAFETY VAULT ---
+    # Every time the script runs (even before you click the button),
+    # we check if there is a drawing. If yes, we SAVE it to permanent memory.
+    if map_output is not None and "last_active_drawing" in map_output:
+        drawing = map_output["last_active_drawing"]
+        if drawing is not None:
+            # Save to session state
+            st.session_state["saved_geometry"] = drawing["geometry"]
+
+with col2:
+    # Status Indicator
+    if "saved_geometry" in st.session_state:
+        st.success(f"✅ Region Saved!", icon="💾")
+        st.write("Ready to analyze.")
+    else:
+        st.warning("Waiting for drawing...", icon="✏️")
+
+# --- 5. ANALYSIS LOGIC ---
+if st.button("Run AI Analysis", type="primary"):
     
     roi = None
     
-    # --- CHECK THE KEYED STATE DIRECTLY ---
-    # We look directly into the session state using the key we defined above
-    data = st.session_state.get("satellite_map", {})
-    
-    if data and data.get("last_active_drawing"):
-        # We found the drawing!
-        coords = data["last_active_drawing"]["geometry"]["coordinates"]
-        roi = ee.Geometry.Polygon(coords)
-        st.success("✅ Drawing detected! Starting analysis...")
+    # We look inside the "Safety Vault", NOT at the map directly.
+    # This prevents the "No drawing found" error if the map resets.
+    if "saved_geometry" in st.session_state:
+        try:
+            coords = st.session_state["saved_geometry"]["coordinates"]
+            roi = ee.Geometry.Polygon(coords)
+        except Exception as e:
+            st.error(f"Error reading coordinates: {e}")
+            st.stop()
     else:
-        # Fallback
-        st.warning("⚠️ No drawing found. Did you draw a rectangle? Using London (Default).")
-        roi = ee.Geometry.Point([-0.12, 51.50]).buffer(10000).bounds()
+        st.error("⚠️ No drawing saved! Please draw a box first.")
+        # Fallback to London just so it doesn't crash
+        roi = ee.Geometry.Point([-0.12, 51.50]).buffer(5000).bounds()
 
-    with st.spinner("Processing Satellite Data (2017 vs 2024)..."):
-        # (Standard Analysis Code)
+    with st.spinner("Processing..."):
+        # Fixed Parameters
+        CLOUD_LIMIT = 80
+        GREEN_CLASS_ID = 1
         common_bands = ['B2', 'B3', 'B4', 'B8', 'B11', 'SCL']
-        
+
+        # 1. Fetch Data
         dataset_old = ee.ImageCollection('COPERNICUS/S2_SR') \
             .filterDate('2017-01-01', '2019-12-31') \
             .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', CLOUD_LIMIT)) \
-            .filterBounds(roi) \
-            .sort('CLOUDY_PIXEL_PERCENTAGE') \
-            .limit(30) \
-            .select(common_bands) \
-            .map(mask_s2_clouds) \
-            .map(add_indices)
+            .filterBounds(roi).sort('CLOUDY_PIXEL_PERCENTAGE').limit(30) \
+            .select(common_bands).map(mask_s2_clouds).map(add_indices)
 
         dataset_new = ee.ImageCollection('COPERNICUS/S2_SR') \
             .filterDate('2023-01-01', '2024-12-30') \
             .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', CLOUD_LIMIT)) \
-            .filterBounds(roi) \
-            .sort('CLOUDY_PIXEL_PERCENTAGE') \
-            .limit(30) \
-            .select(common_bands) \
-            .map(mask_s2_clouds) \
-            .map(add_indices)
+            .filterBounds(roi).sort('CLOUDY_PIXEL_PERCENTAGE').limit(30) \
+            .select(common_bands).map(mask_s2_clouds).map(add_indices)
 
+        # 2. Process
         image_old = dataset_old.median().clip(roi)
         image_new = dataset_new.median().clip(roi)
 
+        # 3. Classify
         training = image_new.sample(region=roi, scale=10, numPixels=5000)
         clusterer = ee.Clusterer.wekaKMeans(3).train(training)
         classified_old = image_old.cluster(clusterer)
         classified_new = image_new.cluster(clusterer)
 
-    # --- 7. RESULTS ---
-    st.subheader("Visual Comparison")
-    m2 = geemap.Map()
-    m2.centerObject(roi, 12)
-    vis_params = {'min': 0, 'max': 2, 'palette': ['red', 'green', 'blue']}
+    # --- 6. RESULTS ---
+    st.divider()
+    st.subheader("Results")
     
-    left_layer = geemap.ee_tile_layer(classified_old, vis_params, '2017', opacity=0.6)
-    right_layer = geemap.ee_tile_layer(classified_new, vis_params, '2024', opacity=0.6)
-    m2.split_map(left_layer, right_layer)
+    # Display Result Map
+    m2 = geemap.Map()
+    m2.centerObject(roi, 13)
+    vis = {'min': 0, 'max': 2, 'palette': ['red', 'green', 'blue']}
+    m2.split_map(
+        geemap.ee_tile_layer(classified_old, vis, '2017'),
+        geemap.ee_tile_layer(classified_new, vis, '2024')
+    )
     m2.to_streamlit(height=500)
 
-    # Calculate Areas
-    def get_area(image, class_id):
-        mask = image.eq(class_id)
-        area_image = mask.multiply(ee.Image.pixelArea())
-        stats = area_image.reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=roi,
-            scale=10,
-            maxPixels=1e10
+    # Calculate Metrics
+    def get_area(img):
+        mask = img.eq(GREEN_CLASS_ID)
+        area = mask.multiply(ee.Image.pixelArea()).reduceRegion(
+            reducer=ee.Reducer.sum(), geometry=roi, scale=10, maxPixels=1e10
         )
-        return stats.get('cluster').getInfo()
+        return area.get('cluster').getInfo()
 
-    area_old_sqm = get_area(classified_old, GREEN_CLASS_ID)
-    area_new_sqm = get_area(classified_new, GREEN_CLASS_ID)
+    val_old = get_area(classified_old) or 0
+    val_new = get_area(classified_new) or 0
     
-    if area_old_sqm is None: area_old_sqm = 0
-    if area_new_sqm is None: area_new_sqm = 0
+    km_old = val_old / 1e6
+    km_new = val_new / 1e6
+    diff = km_new - km_old
 
-    area_old_km = area_old_sqm / 1e6
-    area_new_km = area_new_sqm / 1e6
-    
-    colA, colB, colC = st.columns(3)
-    colA.metric("2017 Green Space", f"{area_old_km:.2f} km²")
-    colB.metric("2024 Green Space", f"{area_new_km:.2f} km²")
-    diff = area_new_km - area_old_km
-    colC.metric("Net Change", f"{diff:.2f} km²", delta=f"{diff:.2f} km²")
-
-    # Plotting
-    st.subheader("2030 Projections")
-    years_elapsed = 2024 - 2017
-    rate_per_year = diff / years_elapsed if years_elapsed > 0 else 0
-    predicted_area_2030 = area_new_km + (rate_per_year * 6)
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-    years_hist = [2017, 2024]
-    values_hist = [area_old_km, area_new_km]
-    years_pred = [2024, 2030]
-    values_pred = [area_new_km, predicted_area_2030]
-
-    ax.plot(years_hist, values_hist, marker='o', linestyle='-', color='green', linewidth=3, label='Observed')
-    ax.plot(years_pred, values_pred, marker='o', linestyle='--', color='gray', linewidth=2.5, label='Projected')
-    
-    final_color = 'red' if predicted_area_2030 < area_new_km else 'blue'
-    ax.scatter([2030], [predicted_area_2030], color=final_color, s=200, zorder=5)
-    
-    ax.set_title("Green Space Projection")
-    ax.set_ylabel("Area (sq km)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    st.pyplot(fig)
+    # Metrics Row
+    c1, c2, c3 = st.columns(3)
+    c1.metric("2017 Green Space", f"{km_old:.2f} km²")
+    c2.metric("2024 Green Space", f"{km_new:.2f} km²")
+    c3.metric("Change", f"{diff:.2f} km²", delta=f"{diff:.2f} km²")
