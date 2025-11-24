@@ -58,27 +58,42 @@ with col1:
     m = geemap.Map()
     m.add_basemap('HYBRID')
     
-    # Display the map and capture output
+    # Display the map
     map_output = m.to_streamlit(height=500)
+    
+    # --- FIX: SAVE DRAWING TO MEMORY IMMEDIATELY ---
+    # We check if a drawing exists RIGHT NOW, outside the button.
+    # If it does, we save it to 'session_state' (the app's memory).
+    if map_output is not None and map_output.get("last_active_drawing"):
+        drawing_geometry = map_output["last_active_drawing"]["geometry"]
+        st.session_state["user_drawing"] = drawing_geometry
+        st.success("✅ Area Captured! Now click 'Run AI Analysis'.")
 
 # --- 6. ANALYSIS LOGIC ---
 if st.button("Run AI Analysis"):
     
-    # --- CRITICAL FIX: SAFETY CHECK ---
-    # We check if map_output is actually a dictionary (data) before trying to read it.
-    # If it is not a dictionary (e.g. None or a DeltaGenerator), we skip the drawing logic.
     roi = None
     
-    if isinstance(map_output, dict) and map_output.get("last_active_drawing"):
-        # Extract geometry from the drawing
-        coords = map_output["last_active_drawing"]["geometry"]["coordinates"]
-        roi = ee.Geometry.Polygon(coords)
+    # --- FIX: READ FROM MEMORY ---
+    # Instead of asking the map (which might have just reset), 
+    # we ask the Session State memory.
+    if "user_drawing" in st.session_state:
+        try:
+            coords = st.session_state["user_drawing"]["coordinates"]
+            roi = ee.Geometry.Polygon(coords)
+        except Exception as e:
+            st.warning(f"Error reading shape: {e}")
     else:
-        # Default to London if no box drawn or if map return failed
-        st.warning("⚠️ No box drawn (or map data unavailable). Using London (Default).")
+        # Fallback if memory is empty
+        st.warning("⚠️ No box detected in memory. Using London (Default).")
         roi = ee.Geometry.Point([-0.12, 51.50]).buffer(10000).bounds()
 
+    # The rest of your analysis code remains exactly the same...
     with st.spinner("Accessing Satellite Constellation..."):
+        # ... (Your existing analysis code goes here) ...
+        # (Copy your existing code from 'common_bands = ...' downwards)
+        
+        # JUST FOR CONTEXT, PASTE THE REST OF YOUR EXISTING LOGIC BELOW:
         common_bands = ['B2', 'B3', 'B4', 'B8', 'B11', 'SCL']
         
         # Load Data
