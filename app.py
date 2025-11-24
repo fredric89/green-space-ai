@@ -9,20 +9,21 @@ st.set_page_config(layout="wide", page_title="Green Space AI")
 st.title("🌍 AI Green Space Analyzer (2017 vs 2024)")
 st.markdown("Compare satellite imagery to detect changes in urban green space.")
 
-# --- 2. AUTHENTICATION (ROBOT/SERVICE ACCOUNT MODE) ---
+# --- 2. AUTHENTICATION (SIMPLIFIED) ---
 import json
 from google.oauth2 import service_account
 
 try:
-    # 1. Load the JSON string from secrets
-    # We use strict=False to handle potential control characters in the private key
-    service_account_info = json.loads(st.secrets["earth_engine"]["service_account_json"], strict=False)
+    # 1. Load the JSON string from secrets (No "earth_engine" category anymore)
+    # We access the key "service_account_json" directly at the top level
+    service_account_info = json.loads(st.secrets["service_account_json"], strict=False)
     
-    # 2. Create credentials from the JSON info
+    # 2. Create credentials
     creds = service_account.Credentials.from_service_account_info(service_account_info)
     
     # 3. Initialize Earth Engine
-    ee.Initialize(creds, project=st.secrets["gcp_project"]["project_id"])
+    # We also access "project_id" directly
+    ee.Initialize(creds, project=st.secrets["project_id"])
     
 except Exception as e:
     st.error(f"Authentication failed: {e}")
