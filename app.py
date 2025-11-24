@@ -72,16 +72,15 @@ if st.button("Run AI Analysis", type="primary"):
             st.error(f"Coordinates Error: {e}")
             st.stop()
     else:
-        st.error("⚠️ No drawing found! Please draw a box and wait for the ✅.")
-        roi = ee.Geometry.Point([-0.12, 51.50]).buffer(5000).bounds()
+        st.error("⚠️ No drawing found! Please draw a box.")
+        st.stop()
 
-    with st.spinner("Analyzing Satellite Data..."):
+    with st.spinner("Analyzing... (This may take 10-20 seconds)"):
         # Fixed Parameters
         CLOUD_LIMIT = 80
         common_bands = ['B2', 'B3', 'B4', 'B8', 'B11', 'SCL']
 
-        # --- FIX: USE HARMONIZED DATASET ---
-        # The old dataset is empty for 2024. We must use 'COPERNICUS/S2_SR_HARMONIZED'
+        # 1. Fetch Data (Harmonized)
         dataset_old = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
             .filterDate('2017-01-01', '2019-12-31') \
             .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', CLOUD_LIMIT)) \
@@ -94,40 +93,52 @@ if st.button("Run AI Analysis", type="primary"):
             .filterBounds(roi).sort('CLOUDY_PIXEL_PERCENTAGE').limit(30) \
             .select(common_bands).map(mask_s2_clouds).map(add_indices)
         
-        # --- DEBUGGER: CHECK IMAGE COUNT ---
-        count_old = dataset_old.size().getInfo()
+        # Check if we actually found images
         count_new = dataset_new.size().getInfo()
-        
-        if count_old == 0 or count_new == 0:
-            st.error(f"❌ No images found! (2017: {count_old} images, 2024: {count_new} images).")
-            st.info("Try drawing a larger box or picking a location with less clouds.")
-            st.stop()
+        if count_new == 0:
+             st.error("❌ No clear images found for this region/date. Try a different area.")
+             st.stop()
 
         image_old = dataset_old.median().clip(roi)
         image_new = dataset_new.median().clip(roi)
 
-        # Classification
-        training = image_new.sample(region=roi, scale=10, numPixels=5000)
+        # 2. Train AI (K-Means)
+        # We sample pixels to teach the AI what 'Water', 'Green', and 'Urban' look like
+        training = image_new.sample(region=roi, scale=20, numPixels=1000) # Reduced scale for speed
+        
+        # SAFETY CHECK: Did we catch any valid pixels?
+        if training.size().getInfo() == 0:
+             st.error("❌ The AI couldn't find valid pixels to learn from (likely too many clouds).")
+             st.stop()
+             
         clusterer = ee.Clusterer.wekaKMeans(3).train(training)
         classified_old = image_old.cluster(clusterer)
         classified_new = image_new.cluster(clusterer)
 
-    # --- 6. RESULTS ---
+    # --- 6. RESULTS (SIMPLIFIED VISUALIZATION) ---
     st.divider()
     st.subheader("Results")
     
+    # We use a standard map with Layer Control (Toggle) instead of Split Map
+    # This is much less likely to break.
     m2 = geemap.Map()
     m2.centerObject(roi, 13)
-    vis = {'min': 0, 'max': 2, 'palette': ['red', 'green', 'blue']}
     
-    left_layer = geemap.ee_tile_layer(classified_old, vis, '2017')
-    right_layer = geemap.ee_tile_layer(classified_new, vis, '2024')
+    vis_params = {'min': 0, 'max': 2, 'palette': ['red', 'green', 'blue']}
     
-    m2.split_map(left_layer, right_layer)
+    # Add Layers
+    m2.add_layer(classified_old, vis_params, "2017 AI Classification")
+    m2.add_layer(classified_new, vis_params, "2024 AI Classification")
+    
+    # Add standard Layer Control so you can toggle them on/off
+    m2.add_layer_control()
+    
     m2.to_streamlit(height=500)
 
-    # Calculate Metrics
+    # --- 7. METRICS ---
+    st.caption("Calculation in progress...")
     GREEN_CLASS_ID = 1
+    
     def get_area(img):
         mask = img.eq(GREEN_CLASS_ID)
         area = mask.multiply(ee.Image.pixelArea()).reduceRegion(
