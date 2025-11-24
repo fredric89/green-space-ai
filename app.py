@@ -9,26 +9,30 @@ st.set_page_config(layout="wide", page_title="Green Space AI")
 st.title("🌍 AI Green Space Analyzer (2017 vs 2024)")
 st.markdown("Compare satellite imagery to detect changes in urban green space.")
 
-# --- 2. AUTHENTICATION (SIMPLIFIED) ---
+# --- 2. AUTHENTICATION (FINAL ATTEMPT) ---
 import json
 from google.oauth2 import service_account
 
 try:
-    # 1. Load the JSON string from secrets (No "earth_engine" category anymore)
-    # We access the key "service_account_json" directly at the top level
-    service_account_info = json.loads(st.secrets["service_account_json"], strict=False)
+    # 1. Look inside the "gcp" section for the key
+    key_content = st.secrets["gcp"]["service_account_json"]
     
-    # 2. Create credentials
+    # 2. Parse the JSON
+    service_account_info = json.loads(key_content, strict=False)
+    
+    # 3. Create credentials
     creds = service_account.Credentials.from_service_account_info(service_account_info)
     
-    # 3. Initialize Earth Engine
-    # We also access "project_id" directly
-    ee.Initialize(creds, project=st.secrets["project_id"])
+    # 4. Initialize Earth Engine
+    # We grab the project ID from the JSON itself to avoid errors
+    target_project = service_account_info["project_id"]
+    ee.Initialize(creds, project=target_project)
     
 except Exception as e:
     st.error(f"Authentication failed: {e}")
+    # This helps us debug if it fails again:
+    st.write("Available Secret Keys:", st.secrets.keys()) 
     st.stop()
-
 # --- 3. HELPER FUNCTIONS (Cached for performance) ---
 
 def mask_s2_clouds(image):
