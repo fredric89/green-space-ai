@@ -1,0 +1,5 @@
+streamlit
+geemap
+earthengine-api
+matplotlib
+scikit-learn
