@@ -11,16 +11,21 @@ st.set_page_config(layout="wide", page_title="Green Space AI")
 st.title("🌍 AI Green Space Analyzer (2017 vs 2024)")
 st.markdown("Compare satellite imagery to detect changes in urban green space.")
 
-# --- 2. AUTHENTICATION (WITH SCOPES) ---
+# --- 2. AUTHENTICATION ---
 try:
     # 1. Get the JSON Key
-    key_content = st.secrets["earth_engine"]["service_account_json"]
+    if "earth_engine" in st.secrets and "service_account_json" in st.secrets["earth_engine"]:
+         key_content = st.secrets["earth_engine"]["service_account_json"]
+    else:
+         # Fallback for different secret structures
+         key_content = st.secrets["service_account_json"]
+         
     service_account_info = json.loads(key_content, strict=False)
     
     # 2. Define the Permissions (Scopes)
     my_scopes = ['https://www.googleapis.com/auth/earthengine']
     
-    # 3. Create Credentials with correct Scopes
+    # 3. Create Credentials
     creds = service_account.Credentials.from_service_account_info(service_account_info)
     creds = creds.with_scopes(my_scopes)
     
@@ -42,30 +47,29 @@ def add_indices(image):
     ndbi = image.normalizedDifference(['B11', 'B8']).rename('NDBI')
     return image.addBands([ndvi, ndbi])
 
-# --- 4. FIXED SETTINGS (HARDCODED) ---
-# As requested: Fixed values instead of sidebar controls
+# --- 4. FIXED SETTINGS ---
 CLOUD_LIMIT = 80
-GREEN_CLASS_ID = 1  # 1 is usually the 'Green' cluster in K-Means
+GREEN_CLASS_ID = 1
 
-# --- 5. MAP INTERFACE ---
+# --- 5. MAP INTERFACE (WITH FIX) ---
 col1, col2 = st.columns([2, 1])
 
 with col1:
     st.subheader("1. Select Region")
     st.info("Zoom to your city and draw a rectangle using the tool on the left.")
     
-    # Initialize the map
     m = geemap.Map()
     m.add_basemap('HYBRID')
     
-    # Display the map
+    # Render Map
     map_output = m.to_streamlit(height=500)
     
-    # --- FIX: SAVE DRAWING TO MEMORY IMMEDIATELY ---
-    # We check if a drawing exists RIGHT NOW, outside the button.
-    # If it does, we save it to 'session_state' (the app's memory).
-    if map_output is not None and map_output.get("last_active_drawing"):
+    # --- SAFEGUARDED MEMORY SAVE ---
+    # 1. We check if map_output is a DICTIONARY (Data) not a UI Element
+    # 2. We check if it has the drawing key
+    if isinstance(map_output, dict) and map_output.get("last_active_drawing"):
         drawing_geometry = map_output["last_active_drawing"]["geometry"]
+        # Save to Session State (Memory)
         st.session_state["user_drawing"] = drawing_geometry
         st.success("✅ Area Captured! Now click 'Run AI Analysis'.")
 
@@ -74,9 +78,8 @@ if st.button("Run AI Analysis"):
     
     roi = None
     
-    # --- FIX: READ FROM MEMORY ---
-    # Instead of asking the map (which might have just reset), 
-    # we ask the Session State memory.
+    # --- READ FROM MEMORY ---
+    # We ignore the map (which might be resetting) and look at the memory instead
     if "user_drawing" in st.session_state:
         try:
             coords = st.session_state["user_drawing"]["coordinates"]
@@ -84,16 +87,10 @@ if st.button("Run AI Analysis"):
         except Exception as e:
             st.warning(f"Error reading shape: {e}")
     else:
-        # Fallback if memory is empty
         st.warning("⚠️ No box detected in memory. Using London (Default).")
         roi = ee.Geometry.Point([-0.12, 51.50]).buffer(10000).bounds()
 
-    # The rest of your analysis code remains exactly the same...
     with st.spinner("Accessing Satellite Constellation..."):
-        # ... (Your existing analysis code goes here) ...
-        # (Copy your existing code from 'common_bands = ...' downwards)
-        
-        # JUST FOR CONTEXT, PASTE THE REST OF YOUR EXISTING LOGIC BELOW:
         common_bands = ['B2', 'B3', 'B4', 'B8', 'B11', 'SCL']
         
         # Load Data
@@ -129,9 +126,7 @@ if st.button("Run AI Analysis"):
         
         st.success("Analysis Complete! Scroll down for results.")
 
-    # --- 7. RESULTS & PLOTS ---
-    
-    # Display Split Map
+    # --- 7. RESULTS ---
     st.subheader("Visual Comparison")
     m2 = geemap.Map()
     m2.centerObject(roi, 12)
@@ -157,14 +152,12 @@ if st.button("Run AI Analysis"):
     area_old_sqm = get_area(classified_old, GREEN_CLASS_ID)
     area_new_sqm = get_area(classified_new, GREEN_CLASS_ID)
     
-    # Handle cases where area might be None
     if area_old_sqm is None: area_old_sqm = 0
     if area_new_sqm is None: area_new_sqm = 0
 
     area_old_km = area_old_sqm / 1e6
     area_new_km = area_new_sqm / 1e6
     
-    # Metrics
     colA, colB, colC = st.columns(3)
     colA.metric("2017 Green Space", f"{area_old_km:.2f} km²")
     colB.metric("2024 Green Space", f"{area_new_km:.2f} km²")
