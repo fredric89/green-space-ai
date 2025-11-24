@@ -3,5 +3,5 @@ geemap
 earthengine-api
 folium
 streamlit-folium
-google-auth
 matplotlib
+google-auth
