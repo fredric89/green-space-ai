@@ -9,18 +9,36 @@ st.set_page_config(layout="wide", page_title="Green Space AI")
 st.title("🌍 AI Green Space Analyzer (2017 vs 2024)")
 st.markdown("Compare satellite imagery to detect changes in urban green space.")
 
-# --- 2. AUTHENTICATION (CRITICAL FOR DEPLOYMENT) ---
-# We use st.secrets to handle authentication securely on the cloud
+# --- 2. AUTHENTICATION (UPDATED FOR TOKEN) ---
+import os
+from google.oauth2.credentials import Credentials
+
+# This uses the default Earth Engine CLI Client ID (publicly known)
+# which matches the token you generated on your Windows machine.
+DEFAULT_CLIENT_ID = '517222506229-vsmmajv00ul0bs7p89v5m89qs898l1so.apps.googleusercontent.com'
+DEFAULT_CLIENT_SECRET = 'secret-not-needed-for-public-client'
+
 try:
-    # Try using the token from secrets
-    ee.Initialize(project=st.secrets["gcp_project"])
+    # 1. Retrieve the token from Streamlit Secrets
+    refresh_token = st.secrets["earth_engine"]["token"]
+    project_id = st.secrets["gcp_project"]["project_id"]
+    
+    # 2. Construct the credentials object manually
+    creds = Credentials(
+        None,
+        refresh_token=refresh_token,
+        token_uri='https://oauth2.googleapis.com/token',
+        client_id=DEFAULT_CLIENT_ID,
+        client_secret=None
+    )
+    
+    # 3. Initialize Earth Engine with these credentials
+    ee.Initialize(creds, project=project_id)
+    print("Authentication successful via Secrets!")
+
 except Exception as e:
-    st.warning("EE Initialization failed. Trying to authenticate using default flow (local mode).")
-    try:
-        ee.Authenticate()
-        ee.Initialize(project='mystic-curve-479206-q2') # Your fallback project ID
-    except:
-        st.error("Authentication failed. Please check your Streamlit Secrets.")
+    st.error(f"Authentication failed: {e}")
+    st.stop() # Stop the app if login fails
 
 # --- 3. HELPER FUNCTIONS (Cached for performance) ---
 
