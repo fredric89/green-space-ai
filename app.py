@@ -9,26 +9,28 @@ st.set_page_config(layout="wide", page_title="Green Space AI")
 st.title("🌍 AI Green Space Analyzer (2017 vs 2024)")
 st.markdown("Compare satellite imagery to detect changes in urban green space.")
 
-# --- 2. AUTHENTICATION (FINAL) ---
+# --- 2. AUTHENTICATION (WITH SCOPES) ---
 import json
 from google.oauth2 import service_account
 
 try:
-    # 1. Look inside the 'earth_engine' drawer because your logs said it exists
+    # 1. Get the JSON Key
     key_content = st.secrets["earth_engine"]["service_account_json"]
-    
-    # 2. Parse the JSON
     service_account_info = json.loads(key_content, strict=False)
     
-    # 3. Create credentials
+    # 2. Define the Permissions (Scopes)
+    # This tells Google: "This robot is allowed to use Earth Engine"
+    my_scopes = ['https://www.googleapis.com/auth/earthengine']
+    
+    # 3. Create Credentials with correct Scopes
     creds = service_account.Credentials.from_service_account_info(service_account_info)
+    creds = creds.with_scopes(my_scopes)
     
     # 4. Initialize
     ee.Initialize(creds, project="mystic-curve-479206-q2")
     
 except Exception as e:
     st.error(f"Authentication failed: {e}")
-    st.write("Keys visible to server:", st.secrets.keys())
     st.stop()
 # --- 3. HELPER FUNCTIONS (Cached for performance) ---
 
