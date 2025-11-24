@@ -1,5 +1,7 @@
 streamlit
 geemap
 earthengine-api
+folium
+streamlit-folium
+google-auth
 matplotlib
-scikit-learn
