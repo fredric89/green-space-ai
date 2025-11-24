@@ -9,28 +9,37 @@ st.set_page_config(layout="wide", page_title="Green Space AI")
 st.title("🌍 AI Green Space Analyzer (2017 vs 2024)")
 st.markdown("Compare satellite imagery to detect changes in urban green space.")
 
-# --- 2. AUTHENTICATION (MATCHING [gcp] HEADER) ---
+# --- 2. AUTHENTICATION (UNIVERSAL FIX) ---
 import json
 from google.oauth2 import service_account
 
 try:
-    # 1. Access the "gcp" section specifically
-    key_content = st.secrets["gcp"]["service_account_json"]
+    service_account_json = None
     
-    # 2. Parse the JSON string
-    service_account_info = json.loads(key_content, strict=False)
-    
-    # 3. Create credentials
+    # STRATEGY 1: Look for the [gcp] header (Best Practice)
+    if "gcp" in st.secrets and "service_account_json" in st.secrets["gcp"]:
+        service_account_json = st.secrets["gcp"]["service_account_json"]
+        
+    # STRATEGY 2: Look for the [earth_engine] header (Fallback)
+    elif "earth_engine" in st.secrets and "service_account_json" in st.secrets["earth_engine"]:
+        service_account_json = st.secrets["earth_engine"]["service_account_json"]
+        
+    # STRATEGY 3: Look at the Top Level (If headers were deleted)
+    elif "service_account_json" in st.secrets:
+        service_account_json = st.secrets["service_account_json"]
+        
+    if service_account_json is None:
+        st.error("Authentication Error: Could not find 'service_account_json' in secrets.")
+        st.write("Current Keys found:", st.secrets.keys())
+        st.stop()
+
+    # Parse and Initialize
+    service_account_info = json.loads(service_account_json, strict=False)
     creds = service_account.Credentials.from_service_account_info(service_account_info)
-    
-    # 4. Initialize Earth Engine
-    # We get the project ID directly from the JSON to avoid mismatch errors
-    target_project = service_account_info["project_id"]
-    ee.Initialize(creds, project=target_project)
-    
+    ee.Initialize(creds, project="mystic-curve-479206-q2")
+
 except Exception as e:
     st.error(f"Authentication failed: {e}")
-    st.write("Current Secrets Keys:", st.secrets.keys()) # Debug helper
     st.stop()
 # --- 3. HELPER FUNCTIONS (Cached for performance) ---
 
