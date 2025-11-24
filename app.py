@@ -44,13 +44,10 @@ with col1:
     m = geemap.Map()
     m.add_basemap('HYBRID')
     
-    # RENDER THE MAP
-    # We use 'bidirectional=True' to ensure data flows back to Python
+    # RENDER MAP
     map_output = m.to_streamlit(height=500, bidirectional=True)
 
-    # --- THE CRITICAL FIX ---
-    # We check if map_output is actually a Dictionary (Data). 
-    # If it is a DeltaGenerator (UI Element), we SKIP this block to avoid the crash.
+    # SAFETY VAULT: Save drawing to memory
     if isinstance(map_output, dict) and "last_active_drawing" in map_output:
         drawing = map_output["last_active_drawing"]
         if drawing is not None:
@@ -76,7 +73,6 @@ if st.button("Run AI Analysis", type="primary"):
             st.stop()
     else:
         st.error("⚠️ No drawing found! Please draw a box and wait for the ✅.")
-        # Fallback to London to prevent crash
         roi = ee.Geometry.Point([-0.12, 51.50]).buffer(5000).bounds()
 
     with st.spinner("Analyzing Satellite Data..."):
@@ -84,21 +80,33 @@ if st.button("Run AI Analysis", type="primary"):
         CLOUD_LIMIT = 80
         common_bands = ['B2', 'B3', 'B4', 'B8', 'B11', 'SCL']
 
-        dataset_old = ee.ImageCollection('COPERNICUS/S2_SR') \
+        # --- FIX: USE HARMONIZED DATASET ---
+        # The old dataset is empty for 2024. We must use 'COPERNICUS/S2_SR_HARMONIZED'
+        dataset_old = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
             .filterDate('2017-01-01', '2019-12-31') \
             .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', CLOUD_LIMIT)) \
             .filterBounds(roi).sort('CLOUDY_PIXEL_PERCENTAGE').limit(30) \
             .select(common_bands).map(mask_s2_clouds).map(add_indices)
 
-        dataset_new = ee.ImageCollection('COPERNICUS/S2_SR') \
+        dataset_new = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
             .filterDate('2023-01-01', '2024-12-30') \
             .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', CLOUD_LIMIT)) \
             .filterBounds(roi).sort('CLOUDY_PIXEL_PERCENTAGE').limit(30) \
             .select(common_bands).map(mask_s2_clouds).map(add_indices)
+        
+        # --- DEBUGGER: CHECK IMAGE COUNT ---
+        count_old = dataset_old.size().getInfo()
+        count_new = dataset_new.size().getInfo()
+        
+        if count_old == 0 or count_new == 0:
+            st.error(f"❌ No images found! (2017: {count_old} images, 2024: {count_new} images).")
+            st.info("Try drawing a larger box or picking a location with less clouds.")
+            st.stop()
 
         image_old = dataset_old.median().clip(roi)
         image_new = dataset_new.median().clip(roi)
 
+        # Classification
         training = image_new.sample(region=roi, scale=10, numPixels=5000)
         clusterer = ee.Clusterer.wekaKMeans(3).train(training)
         classified_old = image_old.cluster(clusterer)
@@ -111,10 +119,11 @@ if st.button("Run AI Analysis", type="primary"):
     m2 = geemap.Map()
     m2.centerObject(roi, 13)
     vis = {'min': 0, 'max': 2, 'palette': ['red', 'green', 'blue']}
-    m2.split_map(
-        geemap.ee_tile_layer(classified_old, vis, '2017'),
-        geemap.ee_tile_layer(classified_new, vis, '2024')
-    )
+    
+    left_layer = geemap.ee_tile_layer(classified_old, vis, '2017')
+    right_layer = geemap.ee_tile_layer(classified_new, vis, '2024')
+    
+    m2.split_map(left_layer, right_layer)
     m2.to_streamlit(height=500)
 
     # Calculate Metrics
