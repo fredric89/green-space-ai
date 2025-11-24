@@ -2,6 +2,8 @@ import streamlit as st
 import ee
 import geemap.foliumap as geemap
 import matplotlib.pyplot as plt
+import json
+from google.oauth2 import service_account
 
 # --- 1. STREAMLIT CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Green Space AI")
@@ -10,16 +12,12 @@ st.title("🌍 AI Green Space Analyzer (2017 vs 2024)")
 st.markdown("Compare satellite imagery to detect changes in urban green space.")
 
 # --- 2. AUTHENTICATION (WITH SCOPES) ---
-import json
-from google.oauth2 import service_account
-
 try:
     # 1. Get the JSON Key
     key_content = st.secrets["earth_engine"]["service_account_json"]
     service_account_info = json.loads(key_content, strict=False)
     
     # 2. Define the Permissions (Scopes)
-    # This tells Google: "This robot is allowed to use Earth Engine"
     my_scopes = ['https://www.googleapis.com/auth/earthengine']
     
     # 3. Create Credentials with correct Scopes
@@ -32,8 +30,8 @@ try:
 except Exception as e:
     st.error(f"Authentication failed: {e}")
     st.stop()
-# --- 3. HELPER FUNCTIONS (Cached for performance) ---
 
+# --- 3. HELPER FUNCTIONS ---
 def mask_s2_clouds(image):
     scl = image.select('SCL')
     mask = scl.neq(3).And(scl.neq(8)).And(scl.neq(9)).And(scl.neq(10)).And(scl.neq(1))
@@ -44,10 +42,10 @@ def add_indices(image):
     ndbi = image.normalizedDifference(['B11', 'B8']).rename('NDBI')
     return image.addBands([ndvi, ndbi])
 
-# --- 4. SIDEBAR CONTROLS ---
-st.sidebar.header("Settings")
-cloud_limit = st.sidebar.slider("Cloud Limit (%)", 0, 100, 80)
-green_class_id = st.sidebar.selectbox("Which Class is Green?", [0, 1, 2], index=1)
+# --- 4. FIXED SETTINGS (HARDCODED) ---
+# As requested: Fixed values instead of sidebar controls
+CLOUD_LIMIT = 80
+GREEN_CLASS_ID = 1  # 1 is usually the 'Green' cluster in K-Means
 
 # --- 5. MAP INTERFACE ---
 col1, col2 = st.columns([2, 1])
@@ -60,21 +58,24 @@ with col1:
     m = geemap.Map()
     m.add_basemap('HYBRID')
     
-    # Display the map in Streamlit and capture drawing
+    # Display the map and capture output
     map_output = m.to_streamlit(height=500)
 
 # --- 6. ANALYSIS LOGIC ---
-# We only run the analysis if the user clicks a button
 if st.button("Run AI Analysis"):
     
-    # Check for user drawing
+    # --- CRITICAL FIX: SAFETY CHECK ---
+    # We check if map_output is actually a dictionary (data) before trying to read it.
+    # If it is not a dictionary (e.g. None or a DeltaGenerator), we skip the drawing logic.
     roi = None
-    if map_output.get("last_active_drawing"):
+    
+    if isinstance(map_output, dict) and map_output.get("last_active_drawing"):
         # Extract geometry from the drawing
         coords = map_output["last_active_drawing"]["geometry"]["coordinates"]
         roi = ee.Geometry.Polygon(coords)
     else:
-        st.warning("⚠️ No box drawn. Using London (Default).")
+        # Default to London if no box drawn or if map return failed
+        st.warning("⚠️ No box drawn (or map data unavailable). Using London (Default).")
         roi = ee.Geometry.Point([-0.12, 51.50]).buffer(10000).bounds()
 
     with st.spinner("Accessing Satellite Constellation..."):
@@ -83,7 +84,7 @@ if st.button("Run AI Analysis"):
         # Load Data
         dataset_old = ee.ImageCollection('COPERNICUS/S2_SR') \
             .filterDate('2017-01-01', '2019-12-31') \
-            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloud_limit)) \
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', CLOUD_LIMIT)) \
             .filterBounds(roi) \
             .sort('CLOUDY_PIXEL_PERCENTAGE') \
             .limit(30) \
@@ -93,7 +94,7 @@ if st.button("Run AI Analysis"):
 
         dataset_new = ee.ImageCollection('COPERNICUS/S2_SR') \
             .filterDate('2023-01-01', '2024-12-30') \
-            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloud_limit)) \
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', CLOUD_LIMIT)) \
             .filterBounds(roi) \
             .sort('CLOUDY_PIXEL_PERCENTAGE') \
             .limit(30) \
@@ -101,6 +102,7 @@ if st.button("Run AI Analysis"):
             .map(mask_s2_clouds) \
             .map(add_indices)
 
+        # Create Medians
         image_old = dataset_old.median().clip(roi)
         image_new = dataset_new.median().clip(roi)
 
@@ -137,10 +139,10 @@ if st.button("Run AI Analysis"):
         )
         return stats.get('cluster').getInfo()
 
-    area_old_sqm = get_area(classified_old, green_class_id)
-    area_new_sqm = get_area(classified_new, green_class_id)
+    area_old_sqm = get_area(classified_old, GREEN_CLASS_ID)
+    area_new_sqm = get_area(classified_new, GREEN_CLASS_ID)
     
-    # Handle cases where area might be None (if class not found)
+    # Handle cases where area might be None
     if area_old_sqm is None: area_old_sqm = 0
     if area_new_sqm is None: area_new_sqm = 0
 
