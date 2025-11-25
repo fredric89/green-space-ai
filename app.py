@@ -50,10 +50,7 @@ with col1:
     esri_url = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
     m.add_tile_layer(esri_url, name="Esri Satellite", attribution="Esri")
     
-    # Add drawing control
-    m.add_draw_control()
-    
-    # Render Map
+    # Render Map with drawing enabled (bidirectional=True enables drawing)
     map_output = m.to_streamlit(height=500, key="input_map", bidirectional=True)
 
     # Save drawing with better error handling
@@ -138,10 +135,6 @@ if st.button("🚀 Run AI Analysis", type="primary"):
             image_new = dataset_new.median().clip(roi)
             
             # 4. Improved AI Classification using NDVI for training
-            # Use NDVI to identify potential vegetation samples
-            ndvi_old = image_old.select('NDVI')
-            ndvi_new = image_new.select('NDVI')
-            
             # Create training data based on NDVI thresholds
             def get_training_data(image):
                 # Sample from high NDVI (vegetation), medium (mixed), low (non-vegetation)
