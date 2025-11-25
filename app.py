@@ -148,7 +148,7 @@ if st.button("🚀 Run AI Analysis", type="primary"):
                 vegetation = image.select(['B4', 'B3', 'B2', 'B8', 'NDVI']).updateMask(image.select('NDVI').gt(0.4))
                 non_veg = image.select(['B4', 'B3', 'B2', 'B8', 'NDVI']).updateMask(image.select('NDVI').lt(0.2))
                 mixed = image.select(['B4', 'B3', 'B2', 'B8', 'NDVI']).updateMask(
-                    image.select('NDVI').gte(0.2).And(image.select('NDVI').lte(0.4))
+                    image.select('NDVI').gte(0.2).And(image.select('NDVI').lte(0.4)))
                 
                 # Sample from each class
                 samples = ee.FeatureCollection([
@@ -177,7 +177,7 @@ if st.button("🚀 Run AI Analysis", type="primary"):
             
             # Create result map
             m_result = geemap.Map()
-            esri_url = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y/{x}'
+            esri_url = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
             m_result.add_tile_layer(esri_url, name="Esri Satellite", attribution="Esri")
             m_result.centerObject(roi, 12)
             
