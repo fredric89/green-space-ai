@@ -26,13 +26,11 @@ except Exception as e:
 
 # --- 3. HELPER FUNCTIONS ---
 def mask_s2_clouds(image):
-    """Improved cloud masking"""
     qa = image.select('SCL')
     cloud_mask = qa.neq(3).And(qa.neq(8)).And(qa.neq(9))
     return image.updateMask(cloud_mask).divide(10000)
 
 def add_indices(image):
-    """Add vegetation indices"""
     ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI')
     return image.addBands(ndvi)
 
@@ -49,9 +47,7 @@ with col1:
     st.info("1. Draw a rectangle using the toolbar. 2. Wait for '✅ Geometry Captured'. 3. Click Run.")
     
     # Initialize map
-    m = geemap.Map(center=[14.5995, 120.9842], zoom=10)  # Centered on Manila
-    
-    # Add base layer using a different approach
+    m = geemap.Map(center=[14.5995, 120.9842], zoom=10)
     m.add_basemap("SATELLITE")
     
     # Render Map with drawing enabled
@@ -72,7 +68,6 @@ with col2:
     if st.session_state.saved_geometry:
         st.success("✅ Geometry Captured!", icon="💾")
         
-        # Add a clear button
         if st.button("🗑️ Clear Drawing", type="secondary"):
             st.session_state.saved_geometry = None
             st.session_state.analysis_run = False
@@ -96,6 +91,10 @@ if st.session_state.saved_geometry and st.session_state.analysis_run:
         st.divider()
         st.subheader("📊 Analysis in Progress...")
         
+        # Show ROI info
+        bounds = roi.bounds().getInfo()
+        st.write(f"Analysis area bounds: {bounds}")
+        
     except Exception as e:
         st.error(f"Error reading drawing: {e}")
         st.stop()
@@ -103,133 +102,115 @@ if st.session_state.saved_geometry and st.session_state.analysis_run:
     try:
         with st.spinner("Processing Satellite Data... This may take 30-60 seconds."):
             
-            # Use simpler approach with guaranteed data
-            collection_id = 'COPERNICUS/S2_SR_HARMONIZED'
-            bands = ['B2', 'B3', 'B4', 'B8', 'SCL']
+            # SIMPLIFIED DATA FETCH - Using a more reliable approach
+            collection = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
             
-            # Get collections with more lenient filters
-            def get_collection(start_date, end_date):
-                return (ee.ImageCollection(collection_id)
-                        .filterDate(start_date, end_date)
-                        .filterBounds(roi)
-                        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 80))
-                        .select(bands)
-                        .map(mask_s2_clouds)
-                        .map(add_indices))
+            # Get a single recent image for testing
+            recent_image = (collection
+                          .filterBounds(roi)
+                          .filterDate('2024-01-01', '2024-06-01')
+                          .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+                          .first())
             
-            # Use seasonal dates for better data availability
-            dataset_old = get_collection('2018-03-01', '2018-05-31')  # Spring
-            dataset_new = get_collection('2024-03-01', '2024-05-31')  # Spring
-            
-            # Check data availability
-            count_old = dataset_old.size().getInfo()
-            count_new = dataset_new.size().getInfo()
-            
-            st.write(f"**Images found:** {count_old} (2018), {count_new} (2024)")
-            
-            if count_new == 0:
-                st.error("❌ No recent images found. Trying alternative dates...")
-                dataset_new = get_collection('2023-01-01', '2023-12-31')
-                count_new = dataset_new.size().getInfo()
-                st.write(f"Alternative images found: {count_new}")
-            
-            if count_new == 0:
-                st.error("❌ No satellite data available for this area. Please try a different location.")
+            # Check if we got an image
+            try:
+                image_id = recent_image.getInfo()
+                if not image_id:
+                    st.error("No satellite image found for the selected area and date range.")
+                    st.stop()
+            except:
+                st.error("No satellite image found. Try a larger area or different location.")
                 st.stop()
             
-            if count_old == 0:
-                st.warning("⚠️ No historical images found. Using recent data for comparison.")
-                dataset_old = dataset_new
+            # Process the image
+            image_processed = mask_s2_clouds(recent_image)
+            image_processed = add_indices(image_processed)
+            image_clipped = image_processed.clip(roi)
             
-            # Create composites
-            image_old = dataset_old.median().clip(roi)
-            image_new = dataset_new.median().clip(roi)
-            
-            # --- FIXED MAP RENDERING SECTION ---
+            # --- CRITICAL: TEST MAP RENDERING WITH SIMPLE APPROACH ---
             st.subheader("🌿 Analysis Results")
             
-            # Create a NEW map for results - this is crucial
+            # Create a completely new map
             result_map = geemap.Map()
+            
+            # Add basemap first
             result_map.add_basemap("SATELLITE")
             
-            # Set the map center to the ROI
-            roi_center = roi.centroid().getInfo()['coordinates']
+            # Center the map on ROI
+            roi_center = roi.centroid().coordinates().getInfo()
             result_map.set_center(roi_center[0], roi_center[1], 12)
             
-            # Add ROI boundary
-            result_map.add_layer(roi, {"color": "yellow", "fillColor": "00000000"}, "Analysis Area")
+            # TEST 1: Add the ROI boundary (this should always work)
+            result_map.add_layer(roi, {"color": "red", "fillColor": "00000000"}, "Analysis Area")
             
-            # Add imagery with proper visualization
-            visualization = {
-                'bands': ['B4', 'B3', 'B2'],
-                'min': 0,
-                'max': 0.3
-            }
-            
-            result_map.add_layer(image_new, visualization, "Satellite Image 2024")
-            
-            # Simple NDVI visualization for vegetation
-            ndvi_vis = {
-                'min': -0.2,
-                'max': 0.8,
-                'palette': ['red', 'yellow', 'green']
-            }
-            
-            result_map.add_layer(image_new.select('NDVI'), ndvi_vis, "NDVI 2024", shown=False)
-            result_map.add_layer(image_old.select('NDVI'), ndvi_vis, "NDVI 2018", shown=False)
+            # TEST 2: Try adding the satellite image with very simple parameters
+            try:
+                # Use RGB visualization
+                vis_params = {
+                    'bands': ['B4', 'B3', 'B2'],
+                    'min': 0,
+                    'max': 0.3
+                }
+                
+                # Add the Earth Engine image to the map
+                result_map.addLayer(image_clipped, vis_params, "Satellite Image")
+                st.success("✅ Satellite image added to map")
+                
+            except Exception as layer_error:
+                st.error(f"Could not add satellite layer: {layer_error}")
+                
+                # Fallback: Try NDVI visualization
+                try:
+                    ndvi_params = {
+                        'min': -1,
+                        'max': 1,
+                        'palette': ['red', 'yellow', 'green']
+                    }
+                    result_map.addLayer(image_clipped.select('NDVI'), ndvi_params, "NDVI")
+                    st.info("Using NDVI visualization instead")
+                except:
+                    st.warning("Using only base map and ROI boundary")
             
             # Add layer control
             result_map.add_layer_control()
             
-            # Display the map - THIS IS CRITICAL
+            # --- DISPLAY THE MAP ---
             st.write("### Interactive Results Map")
-            result_map.to_streamlit(height=600, key="results_display")
             
-            # --- STATISTICS SECTION ---
-            st.write("### 📊 Vegetation Statistics")
+            # CRITICAL: Use a unique key for the result map
+            result_map.to_streamlit(height=600, key="result_map_unique")
             
-            def calculate_vegetation_area(image):
-                """Calculate vegetation area using NDVI"""
-                ndvi = image.select('NDVI')
-                # Vegetation threshold
-                vegetation = ndvi.gt(0.3)
-                area = vegetation.multiply(ee.Image.pixelArea())
-                stats = area.reduceRegion(
-                    reducer=ee.Reducer.sum(),
+            # --- SIMPLE STATISTICS ---
+            st.write("### 📊 Basic Analysis")
+            
+            try:
+                # Calculate NDVI statistics
+                ndvi_stats = image_clipped.select('NDVI').reduceRegion(
+                    reducer=ee.Reducer.mean(),
                     geometry=roi,
                     scale=30,
                     maxPixels=1e9
-                )
-                return stats.get('NDVI').getInfo() or 0
-            
-            veg_2018 = calculate_vegetation_area(image_old)
-            veg_2024 = calculate_vegetation_area(image_new)
-            
-            km_2018 = veg_2018 / 1000000  # Convert to km²
-            km_2024 = veg_2024 / 1000000
-            change = km_2024 - km_2018
-            
-            # Display results
-            col1, col2, col3 = st.columns(3)
-            col1.metric("2018 Vegetation", f"{km_2018:.2f} km²")
-            col2.metric("2024 Vegetation", f"{km_2024:.2f} km²")
-            col3.metric("Change", f"{change:+.2f} km²", delta=f"{change:+.2f} km²")
-            
-            # Interpretation
-            if change > 0.1:
-                st.success(f"🎉 Significant vegetation increase: {change:.2f} km²")
-            elif change < -0.1:
-                st.error(f"📉 Significant vegetation decrease: {change:.2f} km²")
-            else:
-                st.info("📊 Minimal change in vegetation area")
+                ).getInfo()
                 
-            st.info("💡 **Tip:** Use the layer control in the top-right corner of the map to toggle between different views.")
+                mean_ndvi = ndvi_stats.get('NDVI', 0)
+                
+                st.metric("Average NDVI", f"{mean_ndvi:.3f}")
+                
+                if mean_ndvi > 0.3:
+                    st.success("Good vegetation coverage (NDVI > 0.3)")
+                elif mean_ndvi > 0.1:
+                    st.info("Moderate vegetation coverage")
+                else:
+                    st.warning("Low vegetation coverage")
+                    
+            except Exception as stats_error:
+                st.warning(f"Could not calculate statistics: {stats_error}")
 
     except Exception as e:
         st.error(f"Analysis failed: {str(e)}")
-        import traceback
-        st.error(f"Detailed error: {traceback.format_exc()}")
 
-# Footer
-st.divider()
-st.caption("🌱 Green Space AI - Vegetation Monitoring Tool")
+# Debug information
+with st.expander("Debug Information"):
+    st.write("Session state:", st.session_state)
+    if st.session_state.saved_geometry:
+        st.write("Geometry coordinates length:", len(st.session_state.saved_geometry["coordinates"][0]))
